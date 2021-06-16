@@ -336,6 +336,7 @@ except ImportError as e: INSTALLED_PYYAML = False
 
 ARGS            = None
 USERS_TMUX      = None                  # Once identified, the user's tmux version is saved here for later use
+USERS_TMUX_NUM  = None                  # Same as the above, but safe to convert to float (for versions like "3.2a")
 
 # Flexible Settings (may be safely changed)
 
@@ -512,6 +513,14 @@ def signal_handler_hup( signal_number, frame ):
     _ = repr(signal_number) + repr(frame) # Satisfies pylint
     raise KeyboardInterrupt
 
+def new_session_dimensions_args(tmux_version, user_w, user_h):
+    if tmux_version <= 2.5:
+        return ''                                           # Tmux 2.5 use user screen as default windowsize
+    if tmux_version < 2.8:
+        return "-x " + str(user_w) + " -y " + str(user_h)   # Tmux 2.6 use 80x24 window for detached sessions
+
+    return "-x - -y -"                                      # tmux 2.8 add '-' argument to use users screen as default window size
+
 def satisfies_minimum_version(minimum, version):
     """
     Asserts compliance by tmux version.  I've since seen a similar version check somewhere that may come with Python
@@ -607,7 +616,7 @@ class Window(object): # Common container of window data, divided into sections i
             ", ".join(
                 [ "'" + key + "': [ data = \"" + self.__dict__['data'][key].replace("\n", "\\n") + \
                 "\", starting_line_number = " + str(self.__dict__['line'][key]) + " ]\n" \
-                for key in self.ValidKeys() if self[key] is not "" ] \
+                for key in self.ValidKeys() if self[key] != "" ] \
             ) + \
         " ]\n"
     def ClearKey(self, key):
@@ -619,7 +628,7 @@ class Window(object): # Common container of window data, divided into sections i
     def Serialize(self): # Serialized by appearance
         return "".join( [ self[key] for key in self.ValidKeys() ] )
     def WorkingKeys(self):
-        return [ key for key in self.ValidKeys() if self[key] is not "" ]
+        return [ key for key in self.ValidKeys() if self[key] != "" ]
     def IsFooter(self):
         summary = " ".join( self.WorkingKeys() )
         return True if summary == "title_comments" or summary == "" else False
@@ -774,8 +783,12 @@ class SessionFile(object):
         self.Load_Shorthand_SharedCore( bol )
     def Load(self):
         # Load raw data
+        if sys.version_info < (3, ):
+            mode = "rU"
+        else:  # Python 3 deprecates mode "U" in favor of "newline" option
+            mode = "r"
         rawfile = ""
-        f = open(self.filename, "rU")
+        f = open(self.filename, mode)
         while True:
             line = f.readline()
             if not line: break # EOF
@@ -1328,7 +1341,7 @@ def flex_shell(session, serial=0):
     ##
     ## Show list of windows, or assign selected window
     ##
-    if serial is 0:
+    if serial == 0:
         cmd_list(fpp)
     else:
         flexmenu_index[0] = serial
@@ -2085,12 +2098,13 @@ def tmuxomatic( program_cli, full_cli, user_wh, session_name, session, active_se
                     # The shell's cwd must be set, the only other way to do this is to discard the
                     # window that is automatically created when calling "new-session".
                     cwd_execution = ("cd " + list_panes_dir) if list_panes_dir else ""
-                    list_build.append( "new-session -d -s " + session_name + " -n \"" + window_name + "\"" )
+                    list_build.append( "new-session -d -s " + session_name + " -n \"" + window_name + "\" " + new_session_dimensions_args(USERS_TMUX_NUM, user_wh[0], user_wh[1]))
                     # Normally, tmux automatically renames windows based on whatever is running in the focused pane.
                     # There are two ways to fix this.  1) Add "set-option -g allow-rename off" to your ".tmux.conf".
                     # 2) Add "export DISABLE_AUTO_TITLE=true" to your shell's run commands file (e.g., ".bashrc").
                     # Here we automatically do method 1 for the user, unless the user requests otherwise.
-                    list_build.append( "set-option -t " + session_name + " quiet on" )
+                    if USERS_TMUX_NUM < 2.5:
+                        list_build.append( "set-option -t " + session_name + " quiet on" )
                     renaming = [ "off", "on" ][ARGS.renaming]
                     list_build.append( "set-option -t " + session_name + " allow-rename " + renaming )
                     list_build.append( "set-option -t " + session_name + " automatic-rename " + renaming )
@@ -2288,7 +2302,9 @@ def main():
         print("This version of tmuxomatic requires tmux " + tmux_req + " or higher, found tmux " + tmux_rep)
         exit(0)
     global USERS_TMUX
+    global USERS_TMUX_NUM
     USERS_TMUX = tmux_rep
+    USERS_TMUX_NUM = float(re.sub('[A-Za-z]+', '', USERS_TMUX))
 
     # Settings
     program_cli = sys.argv[0]                   # Program cli: "./tmuxomatic"
